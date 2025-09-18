@@ -1,151 +1,143 @@
+
 import streamlit as st
 import pandas as pd
-import math
+import plotly.express as px
+import plotly.graph_objects as go
 from pathlib import Path
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+st.set_page_config(page_title="Perception Dashboard", layout="wide")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
-
+# ------------- Helpers -------------
 @st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def load_excel(fp: str):
+    xls = pd.ExcelFile(fp)
+    sheets = {name: xls.parse(name) for name in xls.sheet_names}
+    return sheets
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+def to_pct(v):
+    if pd.isna(v): 
+        return None
+    return v*100 if v <= 1 else v
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+def metric_block(title, value):
+    st.metric(title, f"{to_pct(value):.1f}%")
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+def make_stacked_bar(df, y_col, pos_col, neu_col, neg_col, title):
+    plot_df = df.copy()
+    # ensure percentage scale 0-100
+    for c in [pos_col, neu_col, neg_col]:
+        plot_df[c] = plot_df[c].apply(to_pct)
+    fig = go.Figure()
+    fig.add_bar(name="Positive", x=plot_df[y_col], y=plot_df[pos_col])
+    fig.add_bar(name="Neutral",  x=plot_df[y_col], y=plot_df[neu_col])
+    fig.add_bar(name="Negative", x=plot_df[y_col], y=plot_df[neg_col])
+    fig.update_layout(barmode="stack", title=title, yaxis_title="Percent", xaxis_title=None, height=420, margin=dict(l=10,r=10,t=40,b=10))
+    return fig
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+def donut(values, labels, title):
+    fig = px.pie(values=values, names=labels, hole=0.55)
+    fig.update_layout(title=title, height=300, margin=dict(l=10,r=10,t=40,b=10), legend_orientation="h", legend_y=-0.15)
+    return fig
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+# ------------- Sidebar -------------
+st.sidebar.header("Data Source")
+default_path = Path("data/perception_summary.xlsx")
 
-    return gdp_df
+sheets = load_excel(str(default_path))
 
-gdp_df = get_gdp_data()
+# display sheet names for quick sanity
+with st.sidebar.expander("Sheets Loaded", expanded=False):
+    for k in sheets.keys():
+        st.write("•", k)
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+top_n = st.sidebar.slider("Top N to show (Strengths / Improve)", 3, 15, 5)
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+# ------------- Overall Summary -------------
+st.markdown("## Dataset Descriptive Summary")
+overall = sheets.get("Overall Summary")
+if overall is None or overall.empty:
+    st.info("Sheet 'Overall Summary' not found.")
+else:
+    # Expect columns: Category, Percentage
+    overall["Percentage"] = overall["Percentage"].apply(to_pct)
+    c1, c2, c3 = st.columns(3)
+    for col, label in zip([c1, c2, c3], ["Positive", "Neutral", "Negative"]):
+        try:
+            val = overall.loc[overall["Category"].str.lower()==label.lower(), "Percentage"].values[0]
+            with col:
+                metric_block(label, val)
+        except Exception:
+            pass
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+    # Charts
+    left, right = st.columns([1.2, 1.3])
+    with left:
+        st.plotly_chart(donut(overall["Percentage"], overall["Category"], "Overall Perception"), use_container_width=True)
+    with right:
+        barfig = px.bar(overall, x="Category", y="Percentage", text=overall["Percentage"].round(1))
+        barfig.update_layout(yaxis_title="Percent", xaxis_title=None, height=300, margin=dict(l=10,r=10,t=40,b=10))
+        barfig.update_traces(textposition="outside")
+        st.plotly_chart(barfig, use_container_width=True)
 
-# Add some spacing
-''
-''
+# ------------- Top Strengths -------------
+st.markdown("## Strength Areas (by % Positive, with Neutral & Negative)")
+strengths = sheets.get("Top Strengths")
+if strengths is None or strengths.empty:
+    st.info("Sheet 'Top Strengths' not found.")
+else:
+    # Expect columns: Question, Positive, Neutral, Negative
+    strengths_disp = strengths.copy()
+    strengths_disp["Positive"] = strengths_disp["Positive"].apply(to_pct)
+    strengths_disp["Neutral"]  = strengths_disp["Neutral"].apply(to_pct)
+    strengths_disp["Negative"] = strengths_disp["Negative"].apply(to_pct)
+    strengths_disp = strengths_disp.sort_values("Positive", ascending=False).head(top_n)
+    st.plotly_chart(make_stacked_bar(strengths_disp, "Question", "Positive", "Neutral", "Negative", "Top Strengths"), use_container_width=True)
+    with st.expander("View data"):
+        st.dataframe(strengths_disp.reset_index(drop=True))
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+# ------------- Areas to Improve -------------
+st.markdown("## Areas to Improve (lowest % Positive, with Neutral & Negative)")
+improve = sheets.get("Areas to Improve")
+if improve is None or improve.empty:
+    st.info("Sheet 'Areas to Improve' not found.")
+else:
+    # Expect columns: Question, Positive, Neutral, Negative
+    improve_disp = improve.copy()
+    improve_disp["Positive"] = improve_disp["Positive"].apply(to_pct)
+    improve_disp["Neutral"]  = improve_disp["Neutral"].apply(to_pct)
+    improve_disp["Negative"] = improve_disp["Negative"].apply(to_pct)
+    improve_disp = improve_disp.sort_values("Positive", ascending=True).head(top_n)
+    st.plotly_chart(make_stacked_bar(improve_disp, "Question", "Positive", "Neutral", "Negative", "Areas to Improve"), use_container_width=True)
+    with st.expander("View data"):
+        st.dataframe(improve_disp.reset_index(drop=True))
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+# ------------- Yearly Trend -------------
+st.markdown("## Yearly Trend")
+trend = sheets.get("Yearly Trend")
+if trend is None or trend.empty:
+    st.info("Sheet 'Yearly Trend' not found.")
+else:
+    # Accept either 'Positive %' or columns Positive/Neutral/Negative
+    cols = [c.lower() for c in trend.columns]
+    if "positive %" in cols:
+        # simple single-line chart
+        t = trend.rename(columns={trend.columns[cols.index("positive %")]: "Positive %"})
+        fig = px.line(t, x=t.columns[0], y="Positive %", markers=True, title="Positive % over time")
+        fig.update_layout(yaxis_title="Percent", xaxis_title=None, height=340, margin=dict(l=10,r=10,t=40,b=10))
+        st.plotly_chart(fig, use_container_width=True)
+        with st.expander("View data"):
+            st.dataframe(t)
+    else:
+        # if full 3-series is provided
+        for col in trend.columns:
+            if col.lower() in ["positive", "neutral", "negative"]:
+                trend[col] = trend[col].apply(to_pct)
+        melted = trend.melt(id_vars=[trend.columns[0]], value_vars=[c for c in trend.columns if c.lower() in ["positive","neutral","negative"]],
+                            var_name="Category", value_name="Percent")
+        fig = px.line(melted, x=melted.columns[0], y="Percent", color="Category", markers=True, title="Perception over time")
+        fig.update_layout(yaxis_title="Percent", xaxis_title=None, height=340, margin=dict(l=10,r=10,t=40,b=10))
+        st.plotly_chart(fig, use_container_width=True)
+        with st.expander("View data"):
+            st.dataframe(trend)
 
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+st.caption("First version • Built with Streamlit + Plotly. Adjustments welcome.")
